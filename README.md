@@ -45,7 +45,7 @@ Las métricas se calculan con NumPy (`src/aestus/metricas.py`) y las pruebas ver
 
 ## Equipo
 
-Proyecto transversal de Ingeniería en Inteligencia Artificial y Ciencia de Datos, Universidad de Guadalajara.
+Proyecto transversal de la Licenciatura en Inteligencia Artificial y Ciencia de Datos, Universidad de Guadalajara.
 
 - Edgar Alfonso Sánchez Gueta
 - Christopher Joseph Ontiveros Cedillo
