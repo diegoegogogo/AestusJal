@@ -6,7 +6,7 @@ Tablero interactivo en Streamlit para explorar los resultados de **AestusJal**, 
 clasifica si un municipio de Jalisco tendrá **actividad térmica elevada** (más de 3 detecciones satelitales
 NASA FIRMS VIIRS) durante los 7 días siguientes.
 
-**Demo en vivo:** _(enlace de Streamlit Community Cloud)_
+**Demo en vivo:** https://aestusjal.streamlit.app/ (si estaba inactiva, tarda unos segundos en despertar)
 
 ## Qué se puede hacer
 
