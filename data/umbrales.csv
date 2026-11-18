@@ -1,0 +1,8 @@
+modelo,umbral
+Gradient Boosting,0.7397461533546448
+Climatología histórica,0.2898004055023193
+Random Forest,0.7313701510429382
+Regresión logística,0.7364398241043091
+Árbol de decisión,0.736216127872467
+Media móvil 7d,3.0
+GB + municipio,0.7113402813555626
