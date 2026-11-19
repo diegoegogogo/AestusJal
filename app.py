@@ -93,54 +93,107 @@ pred, UMBRAL, oficiales, validacion, diagnostico = cargar()
 prevalencia = pred[Y].mean()
 
 TODOS = f"★ Todos los municipios ({pred['municipio'].nunique()})"
+UNA_FECHA, RANGO = "Una fecha", "Rango (Desde – Hasta)"
 
 
-def consulta_municipio(municipio, c2, c3):
+def elegir_periodo(cols, rango, clave, fmin, fmax, inicial):
+    """Una fecha, o un rango con «Desde» y «Hasta». Devuelve (desde, hasta); en fecha única, ambas iguales."""
+    if rango:
+        desde = cols[1].date_input("Desde", value=fmin, key=f"desde_{clave}", min_value=fmin, max_value=fmax)
+        hasta = cols[2].date_input("Hasta", value=fmax, key=f"hasta_{clave}", min_value=fmin, max_value=fmax)
+        return desde, hasta
+    fecha = cols[1].date_input("Fecha", value=inicial, key=f"fecha_{clave}", min_value=fmin, max_value=fmax,
+                               help="Abre en el primer día con actividad elevada real." if clave != "todos"
+                               else "Abre en el día con más municipios con actividad elevada real.")
+    return fecha, fecha
+
+
+def tabla_modelos(datos):
+    """Matriz de confusión de cada modelo oficial sobre las filas dadas (un día, un rango o un municipio)."""
+    n = len(datos)
+    filas = []
+    for m in OFICIALES:
+        cm = matriz_confusion(datos[Y], datos[m.columna], UMBRAL[m.nombre])
+        alertas, reales = cm["TP"] + cm["FP"], cm["TP"] + cm["FN"]
+        filas.append({
+            "Modelo": m.nombre, "Tipo": m.rol, "En alerta": alertas,
+            "Alerta correcta": cm["TP"], "Falsa alarma": cm["FP"], "No detectó": cm["FN"],
+            "Sin alerta correcta": cm["TN"],
+            "Precisión": cm["TP"] / alertas if alertas else None,
+            "Recall": cm["TP"] / reales if reales else None,
+            "Aciertos": f"{cm['TP'] + cm['TN']:,} de {n:,}",
+        })
+    return pd.DataFrame(filas)
+
+
+def mostrar_tabla_modelos(datos, titulo):
+    st.markdown(f"**{titulo}**")
+    st.dataframe(tabla_modelos(datos), hide_index=True, width="stretch", column_config={
+        "Precisión": st.column_config.NumberColumn(format="percent"),
+        "Recall": st.column_config.NumberColumn(format="percent"),
+    })
+    st.caption("Precisión y recall quedan vacíos cuando no hubo alertas o no hubo casos reales en ese periodo. "
+               "Cada modelo alerta con su propio umbral, elegido en validación 2022–2024.")
+
+
+def consulta_municipio(municipio, rango, cols):
     sub = pred[pred["municipio"] == municipio].set_index("fecha").sort_index()
     positivos = sub.index[sub[Y] == 1]
     inicial = (positivos.min() if len(positivos) else sub.index.min()).date()
-    fecha = c2.date_input("Fecha", value=inicial, key=f"fecha_{municipio}",
-                          min_value=sub.index.min().date(), max_value=sub.index.max().date(),
-                          help="Abre en el primer día con actividad elevada real del municipio.")
-    modelo_graf = c3.selectbox("Modelo para la gráfica", [m.nombre for m in OFICIALES])
+    desde, hasta = elegir_periodo(cols, rango, municipio, sub.index.min().date(), sub.index.max().date(), inicial)
+    modelo_graf = cols[-1].selectbox("Modelo para la gráfica", [m.nombre for m in OFICIALES])
+    if desde > hasta:
+        st.error("«Desde» no puede ser posterior a «Hasta».")
+        return
+    vista = sub.loc[pd.Timestamp(desde):pd.Timestamp(hasta)] if rango else sub
 
-    ts = pd.Timestamp(fecha)
-    if ts not in sub.index:
-        st.warning("No hay registro para esa fecha en este municipio.")
-    else:
-        fila = sub.loc[ts]
-        real = int(fila[Y])
-        filas = []
-        for m in OFICIALES:
-            alerta = int(fila[m.columna] >= UMBRAL[m.nombre])
-            filas.append({"Modelo": m.nombre, "Tipo": m.rol,
-                          "Score": round(float(fila[m.columna]), 3),
-                          "Umbral de validación": round(UMBRAL[m.nombre], 3),
-                          "¿Alertó?": "Sí" if alerta else "No",
-                          "Resultado": resultado(real, alerta)})
-        tabla = pd.DataFrame(filas)
-        aciertos = tabla["Resultado"].str.startswith("✔").sum()
-
-        st.subheader(f"{municipio} · {fecha:%d/%m/%Y}")
+    if rango:
+        n = len(vista)
+        st.subheader(f"{municipio} · {desde:%d/%m/%Y} a {hasta:%d/%m/%Y}")
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Realidad: actividad elevada en 7 días", "Sí" if real else "No")
-        k2.metric("Detecciones ese día", int(fila["detecciones_dia"]))
-        k3.metric("Detecciones en los 7 días siguientes", int(fila["conteo_proximos_7d"]))
-        k4.metric("Modelos que acertaron", f"{aciertos} de {len(tabla)}")
-        st.dataframe(tabla, hide_index=True, width="stretch", column_config={
-            "Score": st.column_config.NumberColumn(format="%.3f"),
-            "Umbral de validación": st.column_config.NumberColumn(format="%.3f"),
-        })
-        st.caption(
-            "El score **no es una probabilidad**: los modelos se entrenaron con pesos y quedaron descalibrados "
-            f"(score medio de Gradient Boosting ≈ {pred['score_gradient_boosting'].mean():.2f} frente a "
-            f"una prevalencia real de {prevalencia:.3f}). Cada modelo alerta cuando su score supera su propio "
-            "umbral, elegido en validación 2022–2024. La media móvil usa conteos, no un score de 0 a 1."
-        )
+        k1.metric("Días en el rango", n)
+        k2.metric("Días con actividad elevada real", f"{int(vista[Y].sum())} de {n}")
+        k3.metric("Detecciones en el rango", f"{int(vista['detecciones_dia'].sum()):,}")
+        k4.metric("Proporción de días con actividad", f"{vista[Y].mean():.1%}")
+        mostrar_tabla_modelos(vista.reset_index(), f"Resultado de cada modelo en {municipio}, día por día en el rango")
+    else:
+        ts = pd.Timestamp(desde)
+        if ts not in sub.index:
+            st.warning("No hay registro para esa fecha en este municipio.")
+        else:
+            fila = sub.loc[ts]
+            real = int(fila[Y])
+            filas = []
+            for m in OFICIALES:
+                alerta = int(fila[m.columna] >= UMBRAL[m.nombre])
+                filas.append({"Modelo": m.nombre, "Tipo": m.rol,
+                              "Score": round(float(fila[m.columna]), 3),
+                              "Umbral de validación": round(UMBRAL[m.nombre], 3),
+                              "¿Alertó?": "Sí" if alerta else "No",
+                              "Resultado": resultado(real, alerta)})
+            tabla = pd.DataFrame(filas)
+            aciertos = tabla["Resultado"].str.startswith("✔").sum()
+
+            st.subheader(f"{municipio} · {desde:%d/%m/%Y}")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Realidad: actividad elevada en 7 días", "Sí" if real else "No")
+            k2.metric("Detecciones ese día", int(fila["detecciones_dia"]))
+            k3.metric("Detecciones en los 7 días siguientes", int(fila["conteo_proximos_7d"]))
+            k4.metric("Modelos que acertaron", f"{aciertos} de {len(tabla)}")
+            st.dataframe(tabla, hide_index=True, width="stretch", column_config={
+                "Score": st.column_config.NumberColumn(format="%.3f"),
+                "Umbral de validación": st.column_config.NumberColumn(format="%.3f"),
+            })
+            st.caption(
+                "El score **no es una probabilidad**: los modelos se entrenaron con pesos y quedaron descalibrados "
+                f"(score medio de Gradient Boosting ≈ {pred['score_gradient_boosting'].mean():.2f} frente a "
+                f"una prevalencia real de {prevalencia:.3f}). Cada modelo alerta cuando su score supera su propio "
+                "umbral, elegido en validación 2022–2024. La media móvil usa conteos, no un score de 0 a 1."
+            )
 
     st.subheader(f"{modelo_graf} en {municipio}: score, umbral y realidad")
     col = POR_NOMBRE[modelo_graf].columna
-    g = sub.reset_index()[["fecha", col, Y]].rename(columns={col: "score"})
+    g = vista.reset_index()[["fecha", col, Y]].rename(columns={col: "score"})
     g["Realidad"] = g[Y].map({1: "Actividad elevada", 0: "Sin actividad elevada"})
     base = alt.Chart(g).encode(x=alt.X("fecha:T", axis=EJE_FECHA))
     linea = base.mark_line(color="#4C78A8").encode(y=alt.Y("score:Q", title="Score del modelo"),
@@ -151,16 +204,16 @@ def consulta_municipio(municipio, c2, c3):
     st.altair_chart((linea + regla + puntos).properties(height=320), width="stretch")
     st.caption("Línea naranja punteada: umbral de alerta. Marcas rojas arriba: días cuya ventana de 7 días tuvo actividad elevada real.")
 
-    cm = matriz_confusion(sub[Y], sub[col], UMBRAL[modelo_graf])
+    cm = matriz_confusion(vista[Y], vista[col], UMBRAL[modelo_graf])
     p, r, _ = precision_recall_f1(cm)
     st.markdown(
-        f"**En {municipio}, {modelo_graf}:** {cm['TP']} días con alerta correcta, {cm['FP']} días de falsa alarma, "
-        f"{cm['FN']} días positivos sin alerta. Precisión {p:.0%}, recall {r:.0%} "
-        f"({int(sub[Y].sum())} días positivos de {len(sub)})."
+        f"**En {municipio}, {modelo_graf}{' (rango elegido)' if rango else ''}:** {cm['TP']} días con alerta correcta, "
+        f"{cm['FP']} días de falsa alarma, {cm['FN']} días positivos sin alerta. Precisión {p:.0%}, recall {r:.0%} "
+        f"({int(vista[Y].sum())} días positivos de {len(vista)})."
     )
 
     st.subheader(f"Detecciones térmicas diarias en {municipio}")
-    det = sub.reset_index()[["fecha", "detecciones_dia"]]
+    det = vista.reset_index()[["fecha", "detecciones_dia"]]
     st.altair_chart(alt.Chart(det).mark_bar(color="#4C78A8").encode(
         x=alt.X("fecha:T", axis=EJE_FECHA),
         y=alt.Y("detecciones_dia:Q", title="Detecciones por día"),
@@ -168,52 +221,54 @@ def consulta_municipio(municipio, c2, c3):
     ).properties(height=220), width="stretch")
 
 
-def consulta_todos(c2, c3):
-    """Vista agregada: los 125 municipios a la vez, para una fecha y un modelo."""
-    positivos_por_dia = pred.groupby("fecha")[Y].sum()
-    fecha = c2.date_input("Fecha", value=positivos_por_dia.idxmax().date(), key="fecha_todos",
-                          min_value=pred["fecha"].min().date(), max_value=pred["fecha"].max().date(),
-                          help="Abre en el día con más municipios con actividad elevada real.")
-    modelo_graf = c3.selectbox("Modelo para la gráfica", [m.nombre for m in OFICIALES])
+def consulta_todos(rango, cols):
+    """Vista agregada: los 125 municipios a la vez, para una fecha o un rango y un modelo."""
+    desde, hasta = elegir_periodo(cols, rango, "todos", pred["fecha"].min().date(), pred["fecha"].max().date(),
+                                  pred.groupby("fecha")[Y].sum().idxmax().date())
+    modelo_graf = cols[-1].selectbox("Modelo para la gráfica", [m.nombre for m in OFICIALES])
+    if desde > hasta:
+        st.error("«Desde» no puede ser posterior a «Hasta».")
+        return
     col = POR_NOMBRE[modelo_graf].columna
     umbral = UMBRAL[modelo_graf]
+    n_mun = pred["municipio"].nunique()
+    datos = pred[(pred["fecha"] >= pd.Timestamp(desde)) & (pred["fecha"] <= pd.Timestamp(hasta))]
+    vista = datos if rango else pred  # lo que usan las gráficas y el resumen del periodo
 
-    dia = pred[pred["fecha"] == pd.Timestamp(fecha)]
-    if dia.empty:
-        st.warning("No hay registros para esa fecha.")
-    else:
-        n = len(dia)
-        alertas_modelo = int((dia[col] >= umbral).sum())
-        st.subheader(f"Todos los municipios ({n}) · {fecha:%d/%m/%Y}")
+    if datos.empty:
+        st.warning("No hay registros en ese periodo.")
+    elif rango:
+        n = len(datos)
+        st.subheader(f"Todos los municipios ({n_mun}) · {desde:%d/%m/%Y} a {hasta:%d/%m/%Y}")
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Municipios con actividad elevada real", f"{int(dia[Y].sum())} de {n}")
-        k2.metric("Detecciones ese día (suma)", f"{int(dia['detecciones_dia'].sum()):,}")
-        k3.metric("Detecciones en los 7 días siguientes (suma)", f"{int(dia['conteo_proximos_7d'].sum()):,}")
-        k4.metric(f"Municipios en alerta ({modelo_graf})", f"{alertas_modelo} de {n}")
-
-        filas = []
-        for m in OFICIALES:
-            cm = matriz_confusion(dia[Y], dia[m.columna], UMBRAL[m.nombre])
-            alertas = cm["TP"] + cm["FP"]
-            reales = cm["TP"] + cm["FN"]
-            filas.append({
-                "Modelo": m.nombre, "Tipo": m.rol, "Municipios en alerta": alertas,
-                "Alerta correcta": cm["TP"], "Falsa alarma": cm["FP"], "No detectó": cm["FN"],
-                "Sin alerta correcta": cm["TN"],
-                "Precisión": cm["TP"] / alertas if alertas else None,
-                "Recall": cm["TP"] / reales if reales else None,
-                "Aciertos": f"{cm['TP'] + cm['TN']} de {n}",
-            })
-        st.markdown("**Resultado de cada modelo ese día, sumando todos los municipios**")
-        st.dataframe(pd.DataFrame(filas), hide_index=True, width="stretch", column_config={
-            "Precisión": st.column_config.NumberColumn(format="percent"),
-            "Recall": st.column_config.NumberColumn(format="percent"),
-        })
-        st.caption("Precisión y recall quedan vacíos cuando no hubo alertas o no hubo casos reales ese día. "
-                   "Cada modelo alerta con su propio umbral, elegido en validación 2022–2024.")
-
+        k1.metric("Días en el rango", datos["fecha"].nunique())
+        k2.metric("Municipio-día con actividad elevada real", f"{int(datos[Y].sum()):,} de {n:,}")
+        k3.metric("Detecciones en el rango (suma)", f"{int(datos['detecciones_dia'].sum()):,}")
+        k4.metric(f"Municipio-día en alerta ({modelo_graf})", f"{int((datos[col] >= umbral).sum()):,} de {n:,}")
+        mostrar_tabla_modelos(datos, "Resultado de cada modelo en el rango, sumando todos los municipio-día")
+        with st.expander(f"Detalle por municipio en el rango ({modelo_graf})"):
+            alerta = (datos[col] >= umbral)
+            det = pd.DataFrame({
+                "Municipio": datos["municipio"], "Días con actividad real": datos[Y],
+                "Días en alerta": alerta.astype(int),
+                "Alertas correctas": (alerta & (datos[Y] == 1)).astype(int),
+                "Falsas alarmas": (alerta & (datos[Y] == 0)).astype(int),
+                "No detectó": (~alerta & (datos[Y] == 1)).astype(int),
+                "Detecciones (suma)": datos["detecciones_dia"],
+            }).groupby("Municipio", as_index=False).sum()
+            st.dataframe(det.sort_values(["Días con actividad real", "Detecciones (suma)"], ascending=False),
+                         hide_index=True, width="stretch")
+    else:
+        n = len(datos)
+        st.subheader(f"Todos los municipios ({n}) · {desde:%d/%m/%Y}")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Municipios con actividad elevada real", f"{int(datos[Y].sum())} de {n}")
+        k2.metric("Detecciones ese día (suma)", f"{int(datos['detecciones_dia'].sum()):,}")
+        k3.metric("Detecciones en los 7 días siguientes (suma)", f"{int(datos['conteo_proximos_7d'].sum()):,}")
+        k4.metric(f"Municipios en alerta ({modelo_graf})", f"{int((datos[col] >= umbral).sum())} de {n}")
+        mostrar_tabla_modelos(datos, "Resultado de cada modelo ese día, sumando todos los municipios")
         with st.expander(f"Detalle por municipio ({modelo_graf})"):
-            det = dia[["municipio", Y, "detecciones_dia", "conteo_proximos_7d", col]].copy()
+            det = datos[["municipio", Y, "detecciones_dia", "conteo_proximos_7d", col]].copy()
             det["¿Alertó?"] = (det[col] >= umbral).map({True: "Sí", False: "No"})
             det["Resultado"] = [resultado(int(r), int(s >= umbral)) for r, s in zip(det[Y], det[col])]
             det[Y] = det[Y].map({1: "Sí", 0: "No"})
@@ -228,41 +283,46 @@ def consulta_todos(c2, c3):
             })
 
     st.subheader(f"{modelo_graf}: municipios en alerta y con actividad real, día por día")
+    por_dia = vista.groupby("fecha")
     serie = pd.DataFrame({
-        "fecha": pred.groupby("fecha")[Y].sum().index,
-        "Municipios con actividad elevada real": pred.groupby("fecha")[Y].sum().to_numpy(),
-        "Municipios en alerta del modelo": pred.groupby("fecha")[col].apply(lambda s: int((s >= umbral).sum())).to_numpy(),
+        "fecha": por_dia[Y].sum().index,
+        "Municipios con actividad elevada real": por_dia[Y].sum().to_numpy(),
+        "Municipios en alerta del modelo": por_dia[col].apply(lambda s: int((s >= umbral).sum())).to_numpy(),
     }).melt("fecha", var_name="Serie", value_name="Municipios")
     dominio = ["Municipios con actividad elevada real", "Municipios en alerta del modelo"]
-    base = alt.Chart(serie).mark_line(strokeWidth=2).encode(
+    lineas = alt.Chart(serie).mark_line(strokeWidth=2).encode(
         x=alt.X("fecha:T", axis=EJE_FECHA),
-        y=alt.Y("Municipios:Q", title="Municipios (de 125)"),
+        y=alt.Y("Municipios:Q", title=f"Municipios (de {n_mun})"),
         color=alt.Color("Serie:N", scale=alt.Scale(domain=dominio, range=["#E45756", COLORES[modelo_graf]]),
                         legend=alt.Legend(orient="bottom", columns=1, labelLimit=0, title=None)),
         tooltip=["fecha:T", "Serie:N", "Municipios:Q"])
-    marca = alt.Chart(pd.DataFrame({"fecha": [pd.Timestamp(fecha)]})).mark_rule(
-        strokeDash=[4, 4], color="gray").encode(x="fecha:T")
-    st.altair_chart((base + marca).properties(height=320), width="stretch")
-    st.caption("Línea gris punteada: la fecha elegida. Si las dos curvas suben y bajan juntas, el modelo sigue bien "
-               "la temporada; la distancia entre ambas son falsas alarmas o casos omitidos.")
+    if rango:
+        st.altair_chart(lineas.properties(height=320), width="stretch")
+        st.caption("Si las dos curvas suben y bajan juntas, el modelo sigue bien la temporada; la distancia entre "
+                   "ambas son falsas alarmas o casos omitidos.")
+    else:
+        marca = alt.Chart(pd.DataFrame({"fecha": [pd.Timestamp(desde)]})).mark_rule(
+            strokeDash=[4, 4], color="gray").encode(x="fecha:T")
+        st.altair_chart((lineas + marca).properties(height=320), width="stretch")
+        st.caption("Línea gris punteada: la fecha elegida. Si las dos curvas suben y bajan juntas, el modelo sigue bien "
+                   "la temporada; la distancia entre ambas son falsas alarmas o casos omitidos.")
 
-    cm = matriz_confusion(pred[Y], pred[col], umbral)
+    cm = matriz_confusion(vista[Y], vista[col], umbral)
     p, r, _ = precision_recall_f1(cm)
     st.markdown(
-        f"**En los {pred['municipio'].nunique()} municipios y todo el periodo, {modelo_graf}:** "
+        f"**En los {n_mun} municipios y {'el rango elegido' if rango else 'todo el periodo'}, {modelo_graf}:** "
         f"{cm['TP']:,} municipio-día con alerta correcta, {cm['FP']:,} de falsa alarma y "
         f"{cm['FN']:,} positivos sin alerta. Precisión {p:.0%}, recall {r:.0%} "
-        f"({int(pred[Y].sum()):,} municipio-día positivos de {len(pred):,})."
+        f"({int(vista[Y].sum()):,} municipio-día positivos de {len(vista):,})."
     )
 
     st.subheader("Detecciones térmicas diarias en todo Jalisco")
-    tot = pred.groupby("fecha", as_index=False)["detecciones_dia"].sum()
+    tot = vista.groupby("fecha", as_index=False)["detecciones_dia"].sum()
     st.altair_chart(alt.Chart(tot).mark_bar(color="#4C78A8").encode(
         x=alt.X("fecha:T", axis=EJE_FECHA),
         y=alt.Y("detecciones_dia:Q", title="Detecciones por día"),
         tooltip=["fecha:T", alt.Tooltip("detecciones_dia:Q", title="Detecciones")],
     ).properties(height=220), width="stretch")
-
 
 
 st.title("AestusJal · Actividad térmica elevada por municipio de Jalisco")
@@ -281,14 +341,14 @@ tab_consulta, tab_modelos, tab_exp = st.tabs(
 
 # ---------------------------------------------------------------- Consulta
 with tab_consulta:
-    c1, c2, c3 = st.columns([2, 1, 2])
-    municipio = c1.selectbox("Municipio (escribe para buscar)", [TODOS, *sorted(pred["municipio"].unique())], index=1,
-                             help="Elige un municipio o la opción de todos a la vez.")
+    rango = st.radio("Periodo", [UNA_FECHA, RANGO], horizontal=True, key="modo_fecha") == RANGO
+    cols = st.columns([2, 1, 1, 2] if rango else [2, 1, 2])
+    municipio = cols[0].selectbox("Municipio (escribe para buscar)", [TODOS, *sorted(pred["municipio"].unique())],
+                                  index=1, help="Elige un municipio o la opción de todos a la vez.")
     if municipio == TODOS:
-        consulta_todos(c2, c3)
+        consulta_todos(rango, cols)
     else:
-        consulta_municipio(municipio, c2, c3)
-
+        consulta_municipio(municipio, rango, cols)
 
 # ---------------------------------------------------------------- Modelos
 with tab_modelos:
