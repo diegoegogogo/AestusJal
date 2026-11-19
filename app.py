@@ -92,24 +92,10 @@ def resultado(real: int, alerta: int) -> str:
 pred, UMBRAL, oficiales, validacion, diagnostico = cargar()
 prevalencia = pred[Y].mean()
 
-st.title("AestusJal · Actividad térmica elevada por municipio de Jalisco")
-st.caption(
-    "Clasificación binaria: ¿habrá más de 3 detecciones térmicas NASA FIRMS VIIRS en el municipio "
-    "durante los 7 días siguientes? Periodo de test: 2025-01-01 a 2026-09-23."
-)
-st.info(
-    "Una detección térmica **no equivale** a un incendio confirmado. El periodo 2025–2026 ya se observó "
-    "durante el análisis, así que todo lo que muestra este tablero es **exploratorio**."
-)
+TODOS = f"★ Todos los municipios ({pred['municipio'].nunique()})"
 
-tab_consulta, tab_modelos, tab_exp = st.tabs(
-    ["🔎 Consulta por municipio y fecha", "📊 Comparación de modelos", "🧪 Variante exploratoria"]
-)
 
-# ---------------------------------------------------------------- Consulta
-with tab_consulta:
-    c1, c2, c3 = st.columns([2, 1, 2])
-    municipio = c1.selectbox("Municipio (escribe para buscar)", sorted(pred["municipio"].unique()))
+def consulta_municipio(municipio, c2, c3):
     sub = pred[pred["municipio"] == municipio].set_index("fecha").sort_index()
     positivos = sub.index[sub[Y] == 1]
     inicial = (positivos.min() if len(positivos) else sub.index.min()).date()
@@ -180,6 +166,129 @@ with tab_consulta:
         y=alt.Y("detecciones_dia:Q", title="Detecciones por día"),
         tooltip=["fecha:T", alt.Tooltip("detecciones_dia:Q", title="Detecciones")],
     ).properties(height=220), width="stretch")
+
+
+def consulta_todos(c2, c3):
+    """Vista agregada: los 125 municipios a la vez, para una fecha y un modelo."""
+    positivos_por_dia = pred.groupby("fecha")[Y].sum()
+    fecha = c2.date_input("Fecha", value=positivos_por_dia.idxmax().date(), key="fecha_todos",
+                          min_value=pred["fecha"].min().date(), max_value=pred["fecha"].max().date(),
+                          help="Abre en el día con más municipios con actividad elevada real.")
+    modelo_graf = c3.selectbox("Modelo para la gráfica", [m.nombre for m in OFICIALES])
+    col = POR_NOMBRE[modelo_graf].columna
+    umbral = UMBRAL[modelo_graf]
+
+    dia = pred[pred["fecha"] == pd.Timestamp(fecha)]
+    if dia.empty:
+        st.warning("No hay registros para esa fecha.")
+    else:
+        n = len(dia)
+        alertas_modelo = int((dia[col] >= umbral).sum())
+        st.subheader(f"Todos los municipios ({n}) · {fecha:%d/%m/%Y}")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Municipios con actividad elevada real", f"{int(dia[Y].sum())} de {n}")
+        k2.metric("Detecciones ese día (suma)", f"{int(dia['detecciones_dia'].sum()):,}")
+        k3.metric("Detecciones en los 7 días siguientes (suma)", f"{int(dia['conteo_proximos_7d'].sum()):,}")
+        k4.metric(f"Municipios en alerta ({modelo_graf})", f"{alertas_modelo} de {n}")
+
+        filas = []
+        for m in OFICIALES:
+            cm = matriz_confusion(dia[Y], dia[m.columna], UMBRAL[m.nombre])
+            alertas = cm["TP"] + cm["FP"]
+            reales = cm["TP"] + cm["FN"]
+            filas.append({
+                "Modelo": m.nombre, "Tipo": m.rol, "Municipios en alerta": alertas,
+                "Alerta correcta": cm["TP"], "Falsa alarma": cm["FP"], "No detectó": cm["FN"],
+                "Sin alerta correcta": cm["TN"],
+                "Precisión": cm["TP"] / alertas if alertas else None,
+                "Recall": cm["TP"] / reales if reales else None,
+                "Aciertos": f"{cm['TP'] + cm['TN']} de {n}",
+            })
+        st.markdown("**Resultado de cada modelo ese día, sumando todos los municipios**")
+        st.dataframe(pd.DataFrame(filas), hide_index=True, width="stretch", column_config={
+            "Precisión": st.column_config.NumberColumn(format="percent"),
+            "Recall": st.column_config.NumberColumn(format="percent"),
+        })
+        st.caption("Precisión y recall quedan vacíos cuando no hubo alertas o no hubo casos reales ese día. "
+                   "Cada modelo alerta con su propio umbral, elegido en validación 2022–2024.")
+
+        with st.expander(f"Detalle por municipio ({modelo_graf})"):
+            det = dia[["municipio", Y, "detecciones_dia", "conteo_proximos_7d", col]].copy()
+            det["¿Alertó?"] = (det[col] >= umbral).map({True: "Sí", False: "No"})
+            det["Resultado"] = [resultado(int(r), int(s >= umbral)) for r, s in zip(det[Y], det[col])]
+            det[Y] = det[Y].map({1: "Sí", 0: "No"})
+            det = det.rename(columns={
+                "municipio": "Municipio", Y: "Realidad: actividad elevada", "detecciones_dia": "Detecciones ese día",
+                "conteo_proximos_7d": "Detecciones 7 días siguientes", col: "Score"})
+            det = det.sort_values(["Realidad: actividad elevada", "Score"], ascending=[False, False])
+            st.dataframe(det, hide_index=True, width="stretch", column_config={
+                "Score": st.column_config.NumberColumn(format="%.3f"),
+                "Detecciones ese día": st.column_config.NumberColumn(format="%d"),
+                "Detecciones 7 días siguientes": st.column_config.NumberColumn(format="%d"),
+            })
+
+    st.subheader(f"{modelo_graf}: municipios en alerta y con actividad real, día por día")
+    serie = pd.DataFrame({
+        "fecha": pred.groupby("fecha")[Y].sum().index,
+        "Municipios con actividad elevada real": pred.groupby("fecha")[Y].sum().to_numpy(),
+        "Municipios en alerta del modelo": pred.groupby("fecha")[col].apply(lambda s: int((s >= umbral).sum())).to_numpy(),
+    }).melt("fecha", var_name="Serie", value_name="Municipios")
+    dominio = ["Municipios con actividad elevada real", "Municipios en alerta del modelo"]
+    base = alt.Chart(serie).mark_line(strokeWidth=2).encode(
+        x=alt.X("fecha:T", axis=EJE_FECHA),
+        y=alt.Y("Municipios:Q", title="Municipios (de 125)"),
+        color=alt.Color("Serie:N", scale=alt.Scale(domain=dominio, range=["#E45756", COLORES[modelo_graf]]),
+                        legend=alt.Legend(orient="bottom", columns=1, labelLimit=0, title=None)),
+        tooltip=["fecha:T", "Serie:N", "Municipios:Q"])
+    marca = alt.Chart(pd.DataFrame({"fecha": [pd.Timestamp(fecha)]})).mark_rule(
+        strokeDash=[4, 4], color="gray").encode(x="fecha:T")
+    st.altair_chart((base + marca).properties(height=320), width="stretch")
+    st.caption("Línea gris punteada: la fecha elegida. Si las dos curvas suben y bajan juntas, el modelo sigue bien "
+               "la temporada; la distancia entre ambas son falsas alarmas o casos omitidos.")
+
+    cm = matriz_confusion(pred[Y], pred[col], umbral)
+    p, r, _ = precision_recall_f1(cm)
+    st.markdown(
+        f"**En los {pred['municipio'].nunique()} municipios y todo el periodo, {modelo_graf}:** "
+        f"{cm['TP']:,} municipio-día con alerta correcta, {cm['FP']:,} de falsa alarma y "
+        f"{cm['FN']:,} positivos sin alerta. Precisión {p:.0%}, recall {r:.0%} "
+        f"({int(pred[Y].sum()):,} municipio-día positivos de {len(pred):,})."
+    )
+
+    st.subheader("Detecciones térmicas diarias en todo Jalisco")
+    tot = pred.groupby("fecha", as_index=False)["detecciones_dia"].sum()
+    st.altair_chart(alt.Chart(tot).mark_bar(color="#4C78A8").encode(
+        x=alt.X("fecha:T", axis=EJE_FECHA),
+        y=alt.Y("detecciones_dia:Q", title="Detecciones por día"),
+        tooltip=["fecha:T", alt.Tooltip("detecciones_dia:Q", title="Detecciones")],
+    ).properties(height=220), width="stretch")
+
+
+
+st.title("AestusJal · Actividad térmica elevada por municipio de Jalisco")
+st.caption(
+    "Clasificación binaria: ¿habrá más de 3 detecciones térmicas NASA FIRMS VIIRS en el municipio "
+    "durante los 7 días siguientes? Periodo de test: 2025-01-01 a 2026-09-23."
+)
+st.info(
+    "Una detección térmica **no equivale** a un incendio confirmado. El periodo 2025–2026 ya se observó "
+    "durante el análisis, así que todo lo que muestra este tablero es **exploratorio**."
+)
+
+tab_consulta, tab_modelos, tab_exp = st.tabs(
+    ["🔎 Consulta por municipio y fecha", "📊 Comparación de modelos", "🧪 Variante exploratoria"]
+)
+
+# ---------------------------------------------------------------- Consulta
+with tab_consulta:
+    c1, c2, c3 = st.columns([2, 1, 2])
+    municipio = c1.selectbox("Municipio (escribe para buscar)", [TODOS, *sorted(pred["municipio"].unique())], index=1,
+                             help="Elige un municipio o la opción de todos a la vez.")
+    if municipio == TODOS:
+        consulta_todos(c2, c3)
+    else:
+        consulta_municipio(municipio, c2, c3)
+
 
 # ---------------------------------------------------------------- Modelos
 with tab_modelos:
